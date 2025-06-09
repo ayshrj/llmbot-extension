@@ -69,7 +69,17 @@ class LLMChatbot extends HTMLElement {
       "claude-3-sonnet-20240229",
       "claude-3-haiku-20240307",
     ],
+    Azure: [
+      "gpt-3.5-turbo",
+      "gpt-4",
+      "gpt-4o",
+      "gpt-4o-mini",
+      "gpt-4o-8k",
+      "gpt-4o-preview",
+    ],
   };
+
+  DEFAULT_AZURE_API_VERSION = "2023-05-15";
 
   constructor() {
     super();
@@ -82,11 +92,16 @@ class LLMChatbot extends HTMLElement {
 
     this.displayName =
       localStorage.getItem("llmchatbot_name") || this._askNameOnce();
-
     this.provider = localStorage.getItem("llmchatbot_provider") || "Gemini";
     this.model =
       localStorage.getItem("llmchatbot_model") ||
       this.MODEL_OPTIONS[this.provider][0];
+    this.azureApiVersion =
+      localStorage.getItem("llmchatbot_azure_api_version") ||
+      this.DEFAULT_AZURE_API_VERSION;
+
+    this.channel = new BroadcastChannel("llmchatbot_channel");
+    this.channel.onmessage = () => this._syncFromStorage();
 
     if (!window.marked) {
       const s = document.createElement("script");
@@ -110,17 +125,22 @@ class LLMChatbot extends HTMLElement {
     this.$providerSel = this._shadow.getElementById("providerSelect");
     this.$modelSel = this._shadow.getElementById("modelSelect");
     this.$apiInput = this._shadow.getElementById("apiInput");
+    this.$endpointInput = this._shadow.getElementById("endpointInput");
+    this.$apiVerLabel = this._shadow.getElementById("apiVersionLabel");
+    this.$apiVerInput = this._shadow.getElementById("apiVersionInput");
     this.$saveSettings = this._shadow.getElementById("saveSettings");
 
     this._populateProviderUI();
-
     this._addMessage(
       this.SALUTATIONS[Math.floor(Math.random() * this.SALUTATIONS.length)],
       false,
       { markdown: true }
     );
-
     this._bindEvents();
+  }
+
+  disconnectedCallback() {
+    this.channel.close();
   }
 
   _html() {
@@ -143,30 +163,29 @@ class LLMChatbot extends HTMLElement {
           </div>
         </div>
 
-        <!-- Settings panel -->
         <div id="settingsPanel" class="settings hidden">
           <h4>Chatbot Settings</h4>
-
-          <label>
-            Provider
+          <label>Provider
             <select id="providerSelect"></select>
           </label>
-
-          <label>
-            Model
+          <label>Model
             <select id="modelSelect"></select>
           </label>
-
-          <label>
-            API key
-            <input id="apiInput" type="password" placeholder="sk-..." />
+          <label>API key
+            <input id="apiInput" type="password" placeholder="sk-…" />
           </label>
-
+          <label id="endpointLabel" class="hidden">Endpoint
+            <input id="endpointInput" type="text" placeholder="https://…"/>
+          </label>
+          <label id="apiVersionLabel" class="hidden">API Version
+            <input id="apiVersionInput" type="text" placeholder="${
+              this.DEFAULT_AZURE_API_VERSION
+            }" />
+          </label>
           <button id="saveSettings">Save</button>
         </div>
 
         <div class="chatbot-body" id="messages"></div>
-
         <div class="chatbot-footer">
           <input id="input" type="text" placeholder="Type your message…" autocomplete="off"/>
           <button class="send" id="sendBtn" disabled>${this.arrowUp}</button>
@@ -243,7 +262,22 @@ class LLMChatbot extends HTMLElement {
         .settings input,.settings select{height:32px;border:1px solid var(--border);border-radius:6px;padding:0 8px;background:var(--input-bg);color:var(--card-fg);font-size:.85rem;}
         .settings button{align-self:flex-end;background:var(--primary-bg);color:var(--primary-fg);border:none;border-radius:6px;height:32px;padding:0 16px;font-size:.85rem;cursor:pointer;}
         .settings button:hover{background:#0c1220;}
+        #endpointLabel.hidden,#apiVersionLabel.hidden{display:none;}
       </style>`;
+  }
+
+  _syncFromStorage() {
+    this.provider = localStorage.getItem("llmchatbot_provider") || "Gemini";
+    this.model =
+      localStorage.getItem("llmchatbot_model") ||
+      this.MODEL_OPTIONS[this.provider][0];
+    this.azureApiVersion =
+      localStorage.getItem("llmchatbot_azure_api_version") ||
+      this.DEFAULT_AZURE_API_VERSION;
+    this._populateProviderUI();
+    this._shadow.querySelector(
+      ".user-info .email"
+    ).textContent = `${this.provider} • ${this.model}`;
   }
 
   _populateProviderUI() {
@@ -257,6 +291,17 @@ class LLMChatbot extends HTMLElement {
 
     this.$apiInput.value =
       localStorage.getItem(`llmchatbot_api_${this.provider}`) || "";
+
+    if (this.provider === "Azure") {
+      this._shadow.getElementById("endpointLabel").classList.remove("hidden");
+      this._shadow.getElementById("apiVersionLabel").classList.remove("hidden");
+      this.$endpointInput.value =
+        localStorage.getItem("llmchatbot_endpoint") || "";
+      this.$apiVerInput.value = this.azureApiVersion;
+    } else {
+      this._shadow.getElementById("endpointLabel").classList.add("hidden");
+      this._shadow.getElementById("apiVersionLabel").classList.add("hidden");
+    }
   }
 
   _populateModelOptions(provider) {
@@ -275,6 +320,7 @@ class LLMChatbot extends HTMLElement {
     this.$input.addEventListener("input", () => {
       this.$sendBtn.disabled = !this.$input.value.trim() || this.loading;
     });
+
     this.$input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !this.$sendBtn.disabled) this.$sendBtn.click();
     });
@@ -318,60 +364,80 @@ class LLMChatbot extends HTMLElement {
     });
 
     this.$providerSel.addEventListener("change", () => {
-      this._populateModelOptions(this.$providerSel.value);
-      this.$apiInput.value =
-        localStorage.getItem(`llmchatbot_api_${this.$providerSel.value}`) || "";
+      this.provider = this.$providerSel.value;
+      this._populateModelOptions(this.provider);
+      this._populateProviderUI();
     });
 
     this.$saveSettings.addEventListener("click", () => {
       this.provider = this.$providerSel.value;
       this.model = this.$modelSel.value;
+      this.azureApiVersion =
+        this.$apiVerInput.value.trim() || this.DEFAULT_AZURE_API_VERSION;
       const apiKey = this.$apiInput.value.trim();
 
       localStorage.setItem("llmchatbot_provider", this.provider);
       localStorage.setItem("llmchatbot_model", this.model);
-      if (apiKey)
+      localStorage.setItem(
+        "llmchatbot_azure_api_version",
+        this.azureApiVersion
+      );
+      if (apiKey) {
         localStorage.setItem(`llmchatbot_api_${this.provider}`, apiKey);
+      }
+      if (this.provider === "Azure") {
+        localStorage.setItem(
+          "llmchatbot_endpoint",
+          this.$endpointInput.value.trim()
+        );
+      }
 
       this._shadow.querySelector(
         ".user-info .email"
       ).textContent = `${this.provider} • ${this.model}`;
-
       this.$settingsPanel.classList.add("hidden");
+      this.channel.postMessage({ type: "sync" });
     });
   }
 
   _updateToggleIcon() {
     this.$toggleBtn.innerHTML = `${
       this.minimized ? this.sparkles : this.chevronDown
-    }<div class="tooltip">AI Assistant</div>`;
+    }
+      <div class="tooltip">AI Assistant</div>`;
   }
 
   _askNameOnce() {
     let nm = "";
     while (!nm) {
-      nm = prompt("Hi! What name should I address you by?")?.trim();
-      if (nm) {
-        localStorage.setItem("llmchatbot_name", nm);
-        return nm;
-      }
+      nm = prompt("Hi! What name should I address you by?")?.trim() || "";
     }
-    return "Friend";
+    localStorage.setItem("llmchatbot_name", nm);
+    return nm;
   }
 
   _getApiKey() {
     return localStorage.getItem(`llmchatbot_api_${this.provider}`) || "";
   }
 
-  _getEndpoint(apiKey) {
-    if (this.provider === "OpenAI")
+  _getEndpoint() {
+    if (this.provider === "OpenAI") {
       return "https://api.openai.com/v1/chat/completions";
-    if (this.provider === "Claude")
+    }
+    if (this.provider === "Claude") {
       return "https://api.anthropic.com/v1/messages";
-    /* Gemini */
+    }
+    if (this.provider === "Azure") {
+      const base = (localStorage.getItem("llmchatbot_endpoint") || "").replace(
+        /\/$/,
+        ""
+      );
+      return `${base}/openai/deployments/${this.model}/chat/completions?api-version=${this.azureApiVersion}`;
+    }
+    // Gemini default
     return `https://generativelanguage.googleapis.com/v1beta/models/${
       this.model
-    }:generateContent?key=${encodeURIComponent(apiKey)}`;
+    }:generateContent?key=${encodeURIComponent(this._getApiKey())}`;
   }
 
   _addMessage(text, isUser, opts = {}) {
@@ -387,7 +453,6 @@ class LLMChatbot extends HTMLElement {
     } else {
       div.textContent = text;
     }
-
     this.$messages.appendChild(div);
     this.$messages.scrollTop = this.$messages.scrollHeight;
     return div;
@@ -395,15 +460,13 @@ class LLMChatbot extends HTMLElement {
 
   async _requestAI(message) {
     const apiKey = this._getApiKey();
-
     if (!apiKey) {
       this.$settingsPanel.classList.remove("hidden");
       this.$apiInput.focus();
       return;
     }
 
-    const endpoint = this._getEndpoint(apiKey);
-
+    const endpoint = this._getEndpoint();
     this.abortController?.abort();
     this.abortController = new AbortController();
 
@@ -411,29 +474,24 @@ class LLMChatbot extends HTMLElement {
     this.$sendBtn.disabled = true;
     const loader = this._addMessage("", false, { loading: true });
 
-    const fetchOptions = this._composeFetchOptions(endpoint, apiKey, message);
-
+    const opts = this._composeFetchOptions(endpoint, apiKey, message);
     try {
       const res = await fetch(endpoint, {
-        ...fetchOptions,
+        ...opts,
         signal: this.abortController.signal,
       });
-
       const json = await res.json();
-
       const reply =
         json.choices?.[0]?.message?.content ??
         json.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
         json.content?.[0]?.text ??
         json.text ??
         json.reply;
-
       if (!reply) throw new Error("Empty response");
-
       loader.remove();
       this._addMessage(reply, false, { markdown: true });
     } catch (err) {
-      if (err?.name !== "AbortError") {
+      if (err.name !== "AbortError") {
         loader.remove();
         this._addMessage(err.message, false, { error: true });
       }
@@ -460,7 +518,6 @@ class LLMChatbot extends HTMLElement {
         }),
       };
     }
-
     if (this.provider === "Claude") {
       return {
         method: "POST",
@@ -473,6 +530,18 @@ class LLMChatbot extends HTMLElement {
           model: this.model,
           max_tokens: 1024,
           messages: [{ role: "user", content: userMessage }],
+        }),
+      };
+    }
+    if (this.provider === "Azure") {
+      return {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "api-key": apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: "You are a helpful assistant." },
+            { role: "user", content: userMessage },
+          ],
         }),
       };
     }
