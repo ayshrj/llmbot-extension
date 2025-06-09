@@ -1,32 +1,4 @@
-/* -----------------------------------------------------------------
-   inject.js
-   1)  Inject LLMChatbot class source into the page (real DOM context).
-   2)  Append one <llm-chatbot></llm-chatbot> element to <body>.
-------------------------------------------------------------------*/
-(() => {
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("LLMChatbot.js");
-  script.onload = () => {
-    document.body.appendChild(document.createElement("llm-chatbot"));
-  };
-  (document.head || document.documentElement).appendChild(script);
-})();
-```
-
-LLMChatbot.js
-```;
-/* =================================================================
-   LLMChatbot — embeddable, multi-provider chat widget
-   Providers: OpenAI, Gemini, Claude
-   - Same UI as original GameChange widget
-   - Automatically selects correct backend for chosen provider
-   - Prompts user once for:  (1) Preferred display name
-                              (2) API key (per provider)
-   - All settings persisted in localStorage
-==================================================================*/
-
 class LLMChatbot extends HTMLElement {
-  /* ---------- static UI constants (icons, greeting …) ---------- */
   SALUTATIONS = [
     "Hi there! Curious about my work? Ask away.",
     "Hello! Feel free to explore my portfolio — what would you like to know?",
@@ -79,33 +51,43 @@ class LLMChatbot extends HTMLElement {
       1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.36.13.7.31 1
       .54v-.04A1.65 1.65 0 0 0 21 9h.09a2 2 0 0 1 0 4H21a1.65 1.65 0 0 0-1.6 1.17c-.23.3-.41.64-.54 1Z"/></svg>`;
 
-  DEFAULT_MODELS = {
-    OpenAI: "gpt-4o",
-    Gemini: "gemini-1.5-pro-latest",
-    Claude: "claude-3-opus-20240229",
+  MODEL_OPTIONS = {
+    OpenAI: [
+      "gpt-4o",
+      "gpt-4o-mini",
+      "gpt-4o-8k",
+      "gpt-3.5-turbo",
+      "gpt-4o-preview",
+    ],
+    Gemini: [
+      "gemini-1.5-pro-latest",
+      "gemini-1.5-flash-latest",
+      "gemini-1.0-pro",
+    ],
+    Claude: [
+      "claude-3-opus-20240229",
+      "claude-3-sonnet-20240229",
+      "claude-3-haiku-20240307",
+    ],
   };
 
   constructor() {
     super();
     this._shadow = this.attachShadow({ mode: "open" });
 
-    /* ---------------- widget state ---------------- */
     this.minimized = true;
     this.fullscreen = false;
     this.loading = false;
     this.abortController = null;
 
-    /* ---------------- persistent user state ---------------- */
     this.displayName =
       localStorage.getItem("llmchatbot_name") || this._askNameOnce();
 
     this.provider = localStorage.getItem("llmchatbot_provider") || "Gemini";
-
     this.model =
       localStorage.getItem("llmchatbot_model") ||
-      this.DEFAULT_MODELS[this.provider];
+      this.MODEL_OPTIONS[this.provider][0];
 
-    /* Ensure marked is on the page (adds once, shared by all widgets) */
     if (!window.marked) {
       const s = document.createElement("script");
       s.src = "https://cdn.jsdelivr.net/npm/marked@5/marked.min.js";
@@ -113,11 +95,9 @@ class LLMChatbot extends HTMLElement {
     }
   }
 
-  /* ---------- lifecycle ---------- */
   connectedCallback() {
     this._shadow.innerHTML = `${this._style()}${this._html()}`;
 
-    /* element refs */
     this.$container = this._shadow.querySelector(".chatbot");
     this.$messages = this._shadow.getElementById("messages");
     this.$input = this._shadow.getElementById("input");
@@ -128,14 +108,12 @@ class LLMChatbot extends HTMLElement {
     this.$settingsBtn = this._shadow.getElementById("settingsBtn");
     this.$settingsPanel = this._shadow.getElementById("settingsPanel");
     this.$providerSel = this._shadow.getElementById("providerSelect");
-    this.$modelInput = this._shadow.getElementById("modelInput");
+    this.$modelSel = this._shadow.getElementById("modelSelect");
+    this.$apiInput = this._shadow.getElementById("apiInput");
     this.$saveSettings = this._shadow.getElementById("saveSettings");
 
-    /* initialise settings controls */
-    this.$providerSel.value = this.provider;
-    this.$modelInput.value = this.model;
+    this._populateProviderUI();
 
-    /* greet the user */
     this._addMessage(
       this.SALUTATIONS[Math.floor(Math.random() * this.SALUTATIONS.length)],
       false,
@@ -145,7 +123,6 @@ class LLMChatbot extends HTMLElement {
     this._bindEvents();
   }
 
-  /* ---------- template helpers ---------- */
   _html() {
     return `
       <div class="chatbot${this.minimized ? " minimized" : ""}">
@@ -169,22 +146,27 @@ class LLMChatbot extends HTMLElement {
         <!-- Settings panel -->
         <div id="settingsPanel" class="settings hidden">
           <h4>Chatbot Settings</h4>
+
           <label>
             Provider
-            <select id="providerSelect">
-              <option>OpenAI</option>
-              <option>Gemini</option>
-              <option>Claude</option>
-            </select>
+            <select id="providerSelect"></select>
           </label>
+
           <label>
             Model
-            <input id="modelInput" type="text" placeholder="model name" />
+            <select id="modelSelect"></select>
           </label>
+
+          <label>
+            API key
+            <input id="apiInput" type="password" placeholder="sk-..." />
+          </label>
+
           <button id="saveSettings">Save</button>
         </div>
 
         <div class="chatbot-body" id="messages"></div>
+
         <div class="chatbot-footer">
           <input id="input" type="text" placeholder="Type your message…" autocomplete="off"/>
           <button class="send" id="sendBtn" disabled>${this.arrowUp}</button>
@@ -264,9 +246,32 @@ class LLMChatbot extends HTMLElement {
       </style>`;
   }
 
-  /* ---------- event wiring ---------- */
+  _populateProviderUI() {
+    this.$providerSel.innerHTML = Object.keys(this.MODEL_OPTIONS)
+      .map(
+        (p) => `<option${p === this.provider ? " selected" : ""}>${p}</option>`
+      )
+      .join("");
+
+    this._populateModelOptions(this.provider);
+
+    this.$apiInput.value =
+      localStorage.getItem(`llmchatbot_api_${this.provider}`) || "";
+  }
+
+  _populateModelOptions(provider) {
+    const opts = this.MODEL_OPTIONS[provider] || [];
+    this.$modelSel.innerHTML = opts
+      .map(
+        (m) =>
+          `<option value="${m}"${
+            m === this.model ? " selected" : ""
+          }>${m}</option>`
+      )
+      .join("");
+  }
+
   _bindEvents() {
-    /* typing */
     this.$input.addEventListener("input", () => {
       this.$sendBtn.disabled = !this.$input.value.trim() || this.loading;
     });
@@ -274,7 +279,6 @@ class LLMChatbot extends HTMLElement {
       if (e.key === "Enter" && !this.$sendBtn.disabled) this.$sendBtn.click();
     });
 
-    /* send */
     this.$sendBtn.addEventListener("click", () => {
       const txt = this.$input.value.trim();
       if (!txt) return;
@@ -283,7 +287,6 @@ class LLMChatbot extends HTMLElement {
       this._requestAI(txt);
     });
 
-    /* new chat */
     this.$newBtn.addEventListener("click", () => {
       this.$messages.innerHTML = "";
       this._addMessage(
@@ -293,7 +296,6 @@ class LLMChatbot extends HTMLElement {
       );
     });
 
-    /* minimise / expand */
     this.$toggleBtn.addEventListener("click", () => {
       this.minimized = !this.minimized;
       if (this.minimized) this.fullscreen = false;
@@ -302,7 +304,6 @@ class LLMChatbot extends HTMLElement {
       this._updateToggleIcon();
     });
 
-    /* resize */
     this.$resizeBtn.addEventListener("click", () => {
       this.fullscreen = !this.fullscreen;
       this.$container.classList.toggle("fullscreen", this.fullscreen);
@@ -311,24 +312,27 @@ class LLMChatbot extends HTMLElement {
         : this.maximize;
     });
 
-    /* open / close settings */
     this.$settingsBtn.addEventListener("click", () => {
       this.$settingsPanel.classList.toggle("hidden");
-      /* keep current values in sync */
-      this.$providerSel.value = this.provider;
-      this.$modelInput.value = this.model;
+      this._populateProviderUI();
     });
 
-    /* save settings */
+    this.$providerSel.addEventListener("change", () => {
+      this._populateModelOptions(this.$providerSel.value);
+      this.$apiInput.value =
+        localStorage.getItem(`llmchatbot_api_${this.$providerSel.value}`) || "";
+    });
+
     this.$saveSettings.addEventListener("click", () => {
       this.provider = this.$providerSel.value;
-      this.model =
-        this.$modelInput.value.trim() || this.DEFAULT_MODELS[this.provider];
+      this.model = this.$modelSel.value;
+      const apiKey = this.$apiInput.value.trim();
 
       localStorage.setItem("llmchatbot_provider", this.provider);
       localStorage.setItem("llmchatbot_model", this.model);
+      if (apiKey)
+        localStorage.setItem(`llmchatbot_api_${this.provider}`, apiKey);
 
-      /* Reflect new provider/model in header */
       this._shadow.querySelector(
         ".user-info .email"
       ).textContent = `${this.provider} • ${this.model}`;
@@ -340,11 +344,9 @@ class LLMChatbot extends HTMLElement {
   _updateToggleIcon() {
     this.$toggleBtn.innerHTML = `${
       this.minimized ? this.sparkles : this.chevronDown
-    }
-      <div class="tooltip">AI Assistant</div>`;
+    }<div class="tooltip">AI Assistant</div>`;
   }
 
-  /* ---------- helper: ensure we have a display name ---------- */
   _askNameOnce() {
     let nm = "";
     while (!nm) {
@@ -357,30 +359,21 @@ class LLMChatbot extends HTMLElement {
     return "Friend";
   }
 
-  /* ---------- helper: fetch (and cache) API key ---------- */
   _getApiKey() {
-    const keyName = `llmchatbot_api_${this.provider}`;
-    let key = localStorage.getItem(keyName);
-    if (!key) {
-      key = prompt(`Enter your ${this.provider} API key:`)?.trim() || "";
-      if (key) localStorage.setItem(keyName, key);
-    }
-    return key;
+    return localStorage.getItem(`llmchatbot_api_${this.provider}`) || "";
   }
 
-  /* ---------- helper: pick endpoint based on provider ---------- */
-  _getEndpoint() {
-    if (this.provider === "OpenAI") {
+  _getEndpoint(apiKey) {
+    if (this.provider === "OpenAI")
       return "https://api.openai.com/v1/chat/completions";
-    }
-    if (this.provider === "Claude") {
+    if (this.provider === "Claude")
       return "https://api.anthropic.com/v1/messages";
-    }
     /* Gemini */
-    return `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent`;
+    return `https://generativelanguage.googleapis.com/v1beta/models/${
+      this.model
+    }:generateContent?key=${encodeURIComponent(apiKey)}`;
   }
 
-  /* ---------- add a new message div ---------- */
   _addMessage(text, isUser, opts = {}) {
     const { error = false, loading = false, markdown = false } = opts;
     const div = document.createElement("div");
@@ -400,17 +393,17 @@ class LLMChatbot extends HTMLElement {
     return div;
   }
 
-  /* ---------- main network logic ---------- */
   async _requestAI(message) {
     const apiKey = this._getApiKey();
+
     if (!apiKey) {
-      this._addMessage("API key is required.", false, { error: true });
+      this.$settingsPanel.classList.remove("hidden");
+      this.$apiInput.focus();
       return;
     }
 
-    const endpoint = this._getEndpoint();
+    const endpoint = this._getEndpoint(apiKey);
 
-    /* abort previous */
     this.abortController?.abort();
     this.abortController = new AbortController();
 
@@ -418,54 +411,38 @@ class LLMChatbot extends HTMLElement {
     this.$sendBtn.disabled = true;
     const loader = this._addMessage("", false, { loading: true });
 
-    const doFetch = async (retry = false) => {
-      try {
-        const fetchOptions = this._composeFetchOptions(
-          endpoint,
-          apiKey,
-          message
-        );
+    const fetchOptions = this._composeFetchOptions(endpoint, apiKey, message);
 
-        const res = await fetch(endpoint, {
-          ...fetchOptions,
-          signal: this.abortController.signal,
-        });
+    try {
+      const res = await fetch(endpoint, {
+        ...fetchOptions,
+        signal: this.abortController.signal,
+      });
 
-        if (!res.ok) {
-          if (!retry) return doFetch(true);
-          throw new Error(`HTTP ${res.status}`);
-        }
+      const json = await res.json();
 
-        const json = await res.json();
+      const reply =
+        json.choices?.[0]?.message?.content ??
+        json.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
+        json.content?.[0]?.text ??
+        json.text ??
+        json.reply;
 
-        const reply =
-          json.choices?.[0]?.message?.content /* OpenAI */ ??
-          json.candidates?.[0]?.content?.parts
-            ?.map((p) => p.text)
-            .join("") /* Gemini */ ??
-          json.content?.[0]?.text /* Claude stream chunk */ ??
-          json.text /* Claude blocking */ ??
-          json.reply; /* fallback */
+      if (!reply) throw new Error("Empty response");
 
-        if (!reply) throw new Error("Invalid response from backend");
-
-        loader.remove();
-        this._addMessage(reply, false, { markdown: true });
-      } catch (err) {
-        if (err?.name === "AbortError") return;
-        if (!retry) return doFetch(true);
+      loader.remove();
+      this._addMessage(reply, false, { markdown: true });
+    } catch (err) {
+      if (err?.name !== "AbortError") {
         loader.remove();
         this._addMessage(err.message, false, { error: true });
-      } finally {
-        this.loading = false;
-        this.$sendBtn.disabled = !this.$input.value.trim();
       }
-    };
-
-    doFetch();
+    } finally {
+      this.loading = false;
+      this.$sendBtn.disabled = !this.$input.value.trim();
+    }
   }
 
-  /* ---------- helper: build fetch options per provider ---------- */
   _composeFetchOptions(endpoint, apiKey, userMessage) {
     if (this.provider === "OpenAI") {
       return {
@@ -500,24 +477,14 @@ class LLMChatbot extends HTMLElement {
       };
     }
 
-    /* Gemini */
-    const urlWithKey = `${endpoint}?key=${encodeURIComponent(apiKey)}`;
     return {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: userMessage }],
-          },
-        ],
+        contents: [{ role: "user", parts: [{ text: userMessage }] }],
       }),
-      // override endpoint for fetch
-      overrideEndpoint: urlWithKey /* custom field; handled above */,
     };
   }
 }
 
-/* ---------- register the element ---------- */
 customElements.define("llm-chatbot", LLMChatbot);
